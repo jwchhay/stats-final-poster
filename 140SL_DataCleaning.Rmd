@@ -1,0 +1,188 @@
+---
+title: "Stats140SL Data Cleaning"
+author: "Josh Kong"
+date: "12/6/2020"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Loading file and libraries
+```{r}
+library(tidyverse)
+library(tidytext)
+library(cluster)
+listing <- read_csv("listings.csv")
+```
+
+
+## Data Cleaning
+
+Just doing some really quick data cleaning
+```{r}
+#Getting the columns that we want
+listings_df <- listing %>% 
+  select(id, name, description, neighborhood_overview, host_id, price)
+
+#taking a quick look at the dataset
+head(listings_df)
+skimr::skim(listings_df)
+
+#parsing price column
+listings_df$price <- parse_number(listings_df$price)
+```
+
+* Things to note: Description has 1007 NA values, and neighborhood_overview has 10572 NA values.
+
+
+Maybe we can make this into a classfication problem? 
+
+Use k means to create 3 clusters, low price, mid price, and high price. 
+
+```{r}
+listings_df %>% 
+  filter(price < 500) %>% 
+  ggplot(aes(price)) + 
+  geom_histogram()
+
+#make any pricing over $500 automatically high priced. Will do k means on listings less than $500 so that the data doesn't get skewed due to the outliers.
+```
+
+## K means clustering 3 clusters
+```{r}
+listings_cluster <- listings_df %>% 
+  filter(price <= 500 ) #filtering out for pricings less than $500
+
+set.seed(123)
+pricing_cluster <- kmeans(listings_cluster$price, 3)
+cluster_centers <- sort(pricing_cluster$centers)
+pricing_cluster <- kmeans(listings_cluster$price, centers = cluster_centers)
+
+#assigning the clusters
+listings_cluster$value <- pricing_cluster$cluster
+
+#joining all the data together
+listings_c <- listings_cluster %>% 
+  select(id, value)
+
+listings <- listings_df %>% 
+  left_join(listings_c, by = c("id"))
+
+#filling in the values for pricings over $500
+for(i in 1:nrow(listings)){
+  if(is.na(listings$value[i]))
+  {
+    listings$value[i] <- 3
+  }
+}
+
+#changing the label of the value from numbers to "high, medium, low"
+for(i in 1:nrow(listings)){
+  if(listings$value[i] == 1)
+  {
+    listings$value[i] <- "low"
+  }
+  else if(listings$value[i] == 2)
+  {
+    listings$value[i] <- "medium"
+  }
+  else{
+    listings$value[i] <- "high"
+  }
+}
+
+listings$value <- factor(listings$value)
+```
+
+Cleaning up the descriptions
+```{r}
+library(tidytext)
+listings_cleaned <- listings %>% 
+  mutate(description = str_remove_all(description, "\\<br \\/\\>"),
+         description = str_remove_all(description, "\\<b\\>"),
+         description = str_remove_all(description, "\\<\\/b\\>"),
+         description = str_remove_all(description, "The space"),
+         neighborhood_overview = str_remove_all(neighborhood_overview,"\\<br \\/\\>"),
+         neighborhood_overview = str_remove_all(neighborhood_overview,"\\<b\\>"),
+         neighborhood_overview = str_remove_all(neighborhood_overview,"\\<\\/b\\>"),
+         neighborhood_overview = str_remove_all(neighborhood_overview,"The space"))
+
+
+write.csv(listings_cleaned, "listings_cleaned_3clus.csv")
+```
+
+## K means clustering, 2 clusters
+
+Re doing the clusters, but this time making it into only 2 clusters; high and low.
+
+```{r}
+listings_cluster2 <- listings_df %>% 
+  filter(price <= 300 ) #filtering out for pricings less than $300
+
+set.seed(123)
+pricing_cluster2 <- kmeans(listings_cluster2$price, 2)
+cluster_centers2 <- sort(pricing_cluster2$centers)
+pricing_cluster2 <- kmeans(listings_cluster2$price, centers = cluster_centers2)
+
+#assigning the clusters
+listings_cluster2$value <- pricing_cluster2$cluster
+
+#joining all the data together
+listings_c2 <- listings_cluster2 %>% 
+  select(id, value)
+
+listings2 <- listings_df %>% 
+  left_join(listings_c2, by = c("id"))
+
+#filling in the values for pricings over $300
+for(i in 1:nrow(listings2)){
+  if(is.na(listings2$value[i]))
+  {
+    listings2$value[i] <- 2
+  }
+}
+
+#changing the label of the value from numbers to "high, medium, low"
+for(i in 1:nrow(listings2)){
+  if(listings2$value[i] == 1)
+  {
+    listings2$value[i] <- "low"
+  }
+  else
+  {
+    listings2$value[i] <- "high"
+  }
+}
+
+listings2$value <- factor(listings2$value)
+```
+
+Cleaning up descriptions
+
+```{r}
+listings_cleaned2 <- listings2 %>% 
+  mutate(description = str_remove_all(description, "\\<br \\/\\>"),
+         description = str_remove_all(description, "\\<b\\>"),
+         description = str_remove_all(description, "\\<\\/b\\>"),
+         description = str_remove_all(description, "The space"),
+         neighborhood_overview = str_remove_all(neighborhood_overview,"\\<br \\/\\>"),
+         neighborhood_overview = str_remove_all(neighborhood_overview,"\\<b\\>"),
+         neighborhood_overview = str_remove_all(neighborhood_overview,"\\<\\/b\\>"),
+         neighborhood_overview = str_remove_all(neighborhood_overview,"The space"))
+
+
+write.csv(listings_cleaned2, "listings_cleaned_2clus.csv")
+```
+
+
+
+
+
+
+
+
+

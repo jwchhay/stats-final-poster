@@ -1,0 +1,160 @@
+---
+title: "140SL Text Analysis"
+author: "Josh Kong, Jason Chhay, Atif Farook, Raymond Astorga, Richard Garcia"
+date: "12/8/2020"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading libraries and dataset
+```{r}
+library(tidyverse)
+library(tidytext)
+library(tidylo)
+listings <- read_csv("listings_cleaned_2clus.csv")
+listings <- listings[,-1]
+listings$value <- factor(listings$value)
+```
+Low is 138 dollars or under. High is 139 dollars or higher
+
+## Exploring the dataset
+
+```{r}
+#unnesting the description column and filtering out words with special symbols.
+listings_unnested <-  listings %>% 
+  unnest_tokens(word, description) %>% 
+  anti_join(stop_words, by = "word") %>% 
+  filter(!str_detect(word,"[^\x01-\x7F]"))
+
+#looking at the distribution of the length of the descriptions
+listings_unnested %>% 
+  count(id, sort = TRUE) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram()
+```
+
+
+Taking a look at the log weighted odds of which words belong in the high value air bnb descriptions, and which words belong in the low value air bnb descriptions.
+```{r}
+listings_lo <- listings_unnested %>% 
+  count(value, word) %>% 
+  bind_log_odds(value, word,n) %>% 
+  arrange(-log_odds_weighted)
+  
+listings_lo %>% 
+  group_by(value) %>% 
+  slice_max(log_odds_weighted, n = 10) %>% 
+  ungroup() %>% 
+  mutate(word = reorder(word, log_odds_weighted)) %>% 
+  ggplot(aes(word, log_odds_weighted, fill = value)) + 
+  geom_col(show.legend = FALSE) + 
+  facet_wrap(~value, scales = "free") + 
+  scale_fill_manual(values = c("blue","red"))+
+  coord_flip() + 
+  labs(x = "Words", y = "Log Weighted Odds")
+```
+
+
+## Building the Model
+
+### Splitting the data into training and testing sets
+```{r}
+library(tidymodels)
+set.seed(123)
+listings_split <- initial_split(listings, strata = value)
+listings_train <- training(listings_split)
+listings_test <- testing(listings_split)
+```
+
+
+### Preparing the data for model building
+```{r}
+library(themis)
+library(textrecipes)
+listings_rec <- recipe(value ~ description, data = listings_train) %>% 
+  step_tokenize(description) %>%      #unnests the description
+  step_stopwords(description) %>%     #getting rid of stopwords such as "a" and "the"
+  step_tokenfilter(description, max_tokens = 500) %>%  #filter for top 500 words that were present
+  step_tfidf(description) %>%   #converting the words into variables. value is given based on frequency
+  step_normalize(all_predictors())   #Normalizing all the variables
+```
+
+### Creating model specifications
+```{r}
+lasso_spec <- logistic_reg(penalty = tune(), mixture = 1) %>%  #going to tune penalty
+  set_engine("glmnet")
+
+lasso_wf <- workflow() %>%          #adding model and recipe to a workflow
+  add_recipe(listings_rec) %>% 
+  add_model(lasso_spec)
+```
+
+### Tuning the model
+```{r}
+lambda_grid <- grid_regular(penalty(), levels = 20)  #a grid with 20 different lambda values to try
+
+set.seed(123)
+review_folds <- vfold_cv(listings_train, strata = value, v = 5) #5 fold cross validation to test different lambda values
+
+doParallel::registerDoParallel()  #speeds up the process
+set.seed(5)
+lasso_grid <- tune_grid(
+  lasso_wf,                        #going to tune the lasso model 
+  resamples = review_folds,      #resampling with the cv folds made earlier
+  grid = lambda_grid,            #using the 20 different lambda values
+  metrics = metric_set(accuracy) #metric of success is going to be accuracy of predictions
+)
+
+best_tune <- lasso_grid %>%       #selecting best penalty value based on accuracy
+  select_best("accuracy")
+
+final_model <- finalize_workflow(lasso_wf, best_tune)   #finalizing the model
+```
+
+
+### Fitting the model
+```{r}
+lasso_fit <- final_model %>%    #fitting the training data to the model
+  fit(listings_train) 
+
+#observing which words in the description lead to higher prices
+library(vip)
+lasso_fit %>% 
+  pull_workflow_fit() %>% 
+  vi(lambda = best_tune$penalty) %>% 
+  group_by(Sign) %>% 
+  top_n(10, wt = abs(Importance)) %>% 
+  ungroup() %>% 
+  mutate(Importance = abs(Importance),
+         Variable = str_remove(Variable, "tfidf_description_"),
+         Variable = fct_reorder(Variable, Importance),
+         effect = ifelse(Sign == "NEG", "HIGHER", "LOWER")) %>% 
+  ggplot(aes(x = Importance, y = Variable, fill = effect)) + 
+  geom_col(show.legend = FALSE) + 
+  scale_fill_manual(values = c("blue","red"))+
+  facet_wrap(~effect, scales = "free_y")
+```
+
+
+### Testing the model
+```{r}
+
+lasso_test <- final_model %>%   #fitting the final model to the testing data
+  fit(listings_test)
+lasso_pred <- predict(lasso_test, listings_test) 
+
+#confidence matrix of actual values vs predicted values
+conf_mat <- table(prediction = lasso_pred$.pred_class, actual = listings_test$value); conf_mat
+
+#accuracy of the predictions
+(conf_mat[1,1] + conf_mat[2,2]) / sum(conf_mat)
+```
+Getting a 80.5% accuracy rate.
+
+
+
